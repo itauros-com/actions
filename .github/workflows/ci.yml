@@ -1,0 +1,32 @@
+# Every action, run as its consumers run it, on both architectures of GitHub's hosted runners:
+# twice in a row, so that the second run takes what the first one cached.
+name: ci
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  trivy:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      - uses: ./trivy
+      - uses: ./trivy
+      # The database is in place: the scan downloads nothing.
+      - name: scan
+        run: trivy fs --quiet --scanners vuln --skip-db-update --exit-code 0 .

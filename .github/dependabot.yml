@@ -1,0 +1,10 @@
+# The actions these actions use, and the ones CI uses. Each action's directory is listed: a
+# composite action's action.yml is not under .github/workflows.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directories: ["/", "/trivy"]
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci

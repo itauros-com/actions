@@ -1,0 +1,121 @@
+# Trivy on the PATH for the rest of the job: the binary of Trivy's official image, pinned by
+# version and digest, kept in the GitHub Actions cache; and Trivy's vulnerability database,
+# downloaded once a day and kept there too.
+#
+# The cache first: the registries limit anonymous pulls per IP address, and GitHub's hosted
+# runners share their addresses with everyone else's jobs, so a pull can be refused
+# ("toomanyrequests") however little a repository pulls. On a cache miss, the image comes from
+# the first registry that serves it (the same digest on all of them: the same bits).
+#
+# The binary is copied out of the image by BuildKit, not with `docker pull` and `docker cp`:
+# self-hosted runners may have no Docker daemon. The job sets up a buildx builder first
+# (docker/setup-buildx-action), whichever its driver.
+#
+# Not from Trivy's GitHub releases (aquasecurity/setup-trivy, or mise's aqua backend): the
+# aquasecurity organization has an IP allow list that refuses tokens from some runners, and the
+# anonymous download times out whenever GitHub throttles unauthenticated clients.
+name: trivy
+description: Installs a pinned Trivy release from the Actions cache, and caches its vulnerability database for the day.
+inputs:
+  version:
+    description: Trivy's version, the image's tag.
+    default: 0.76.1
+  digest:
+    description: The version's image index digest, the same on every registry in `registries`.
+    default: sha256:790fd66d1697395d8693d1acaa1ea702406a20f109b6fc7bac8db623eca6c06c
+  registries:
+    description: The image's repositories, tried in this order on a cache miss, separated by spaces.
+    default: public.ecr.aws/aquasecurity/trivy ghcr.io/aquasecurity/trivy docker.io/aquasec/trivy
+  database:
+    description: >-
+      "true": download the vulnerability database here, kept in the Actions cache for the day, and
+      point the job's scans at it (TRIVY_CACHE_DIR). "false": each scan fetches its own.
+    default: "true"
+runs:
+  using: composite
+  steps:
+    - id: paths
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+        DIGEST: ${{ inputs.digest }}
+      run: |
+        [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::version: $VERSION, not X.Y.Z"; exit 1; }
+        [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::digest: $DIGEST, not sha256:<64 hex>"; exit 1; }
+        {
+          echo "bin=$RUNNER_TEMP/trivy-bin"
+          echo "cache=$RUNNER_TEMP/trivy-cache"
+          echo "day=$(date -u +%Y-%m-%d)"
+        } >> "$GITHUB_OUTPUT"
+
+    # The binary. The key names the digest: a new version is a new entry.
+    - id: bin
+      uses: actions/cache/restore@v6
+      with:
+        path: ${{ steps.paths.outputs.bin }}
+        key: trivy-bin-${{ inputs.version }}-${{ inputs.digest }}-${{ runner.os }}-${{ runner.arch }}
+    - if: steps.bin.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+        DIGEST: ${{ inputs.digest }}
+        REGISTRIES: ${{ inputs.registries }}
+        DIR: ${{ steps.paths.outputs.bin }}
+      run: |
+        for attempt in 1 2 3; do
+          for registry in $REGISTRIES; do
+            image="$registry:$VERSION@$DIGEST"
+            if printf 'FROM %s AS trivy\nFROM scratch\nCOPY --from=trivy /usr/local/bin/trivy /trivy\n' "$image" \
+              | docker buildx build --quiet --output "type=local,dest=$DIR" -; then
+              echo "Trivy $VERSION from $registry"
+              exit 0
+            fi
+            echo "::warning::Trivy $VERSION: not pulled from $registry"
+          done
+          sleep $((attempt * 10))
+        done
+        echo "::error::Trivy $VERSION: no registry served $DIGEST"
+        exit 1
+    - if: steps.bin.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v6
+      with:
+        path: ${{ steps.paths.outputs.bin }}
+        key: ${{ steps.bin.outputs.cache-primary-key }}
+    - shell: bash
+      env:
+        DIR: ${{ steps.paths.outputs.bin }}
+      run: |
+        echo "$DIR" >> "$GITHUB_PATH"
+        "$DIR/trivy" --version
+
+    # The database: today's, else the latest day's, refreshed here if it is not today's. A
+    # failed refresh leaves the scans to try again themselves.
+    - id: db
+      if: inputs.database == 'true'
+      uses: actions/cache/restore@v6
+      with:
+        path: ${{ steps.paths.outputs.cache }}/db
+        key: trivy-db-${{ steps.paths.outputs.day }}
+        restore-keys: trivy-db-
+    - if: inputs.database == 'true'
+      shell: bash
+      env:
+        CACHE: ${{ steps.paths.outputs.cache }}
+      run: echo "TRIVY_CACHE_DIR=$CACHE" >> "$GITHUB_ENV"
+    - id: refresh
+      if: inputs.database == 'true' && steps.db.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        DIR: ${{ steps.paths.outputs.bin }}
+        CACHE: ${{ steps.paths.outputs.cache }}
+      run: |
+        if "$DIR/trivy" image --quiet --download-db-only --cache-dir "$CACHE"; then
+          echo "fresh=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "::warning::Trivy's database not downloaded: each scan will try"
+        fi
+    - if: steps.refresh.outputs.fresh == 'true'
+      uses: actions/cache/save@v6
+      with:
+        path: ${{ steps.paths.outputs.cache }}/db
+        key: ${{ steps.db.outputs.cache-primary-key }}
