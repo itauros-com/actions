@@ -1,5 +1,5 @@
-# Every action, run as its consumers run it, on both architectures of GitHub's hosted runners:
-# twice in a row, so that the second run takes what the first one cached.
+# Every action, run as its consumers run it. Trivy on both architectures of GitHub's hosted
+# runners, twice in a row, so that the second run takes what the first one cached.
 name: ci
 
 on:
@@ -30,3 +30,32 @@ jobs:
       # The database is in place: the scan downloads nothing.
       - name: scan
         run: trivy fs --quiet --scanners vuln --skip-db-update --exit-code 0 .
+
+  # This repository's own pull requests, checked as consumers check theirs; and a title that is
+  # not a Conventional Commit, which must fail.
+  conventional-commits:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./conventional-commits
+      - id: wrong
+        continue-on-error: true
+        uses: ./conventional-commits
+        with:
+          title: not a conventional title
+          commits: "false"
+      - if: steps.wrong.outcome != 'failure'
+        run: |
+          echo "::error::a title that is not a Conventional Commit passed"
+          exit 1
+
+  # The workflows, the reusable ones included (ghcr-cleanup runs only in its callers).
+  actionlint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: raven-actions/actionlint@v2

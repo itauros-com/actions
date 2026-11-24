@@ -1,0 +1,65 @@
+# A pull request's title (a squash merge's message) and each of its commits, checked against
+# Conventional Commits: <type>(<scope>)?!?: <description>. Merge commits are skipped.
+#
+# The commits come from GitHub's API, not from git: no checkout, and no fetch-depth to get
+# right. The job's token needs `pull-requests: read` (a private repository's pull requests are
+# not readable with `contents: read` alone). The API lists a pull request's first 250 commits.
+name: conventional-commits
+description: Checks a pull request's title and commits against Conventional Commits.
+inputs:
+  types:
+    description: The allowed types, separated by spaces.
+    default: feat fix perf refactor docs test build ci chore style revert
+  title:
+    description: The title to check; the event's pull request title by default.
+    default: ${{ github.event.pull_request.title }}
+  commits:
+    description: '"true": check the pull request''s commits too; "false": the title only.'
+    default: "true"
+  token:
+    description: Reads the pull request's commits.
+    default: ${{ github.token }}
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        TYPES: ${{ inputs.types }}
+        TITLE: ${{ inputs.title }}
+        COMMITS: ${{ inputs.commits }}
+        NUMBER: ${{ github.event.pull_request.number }}
+        REPOSITORY: ${{ github.repository }}
+        GH_TOKEN: ${{ inputs.token }}
+      run: |
+        if [ -z "$NUMBER" ]; then
+          echo "::error::conventional-commits runs on pull_request events"
+          exit 1
+        fi
+        read -ra allowed <<<"$TYPES"
+        if [ "${#allowed[@]}" = 0 ]; then
+          echo "::error::no type in types"
+          exit 1
+        fi
+        alternatives=$(IFS='|'; echo "${allowed[*]}")
+        pattern="^(${alternatives})(\\([a-z0-9._/-]+\\))?!?: .+"
+        failed=0
+        if ! grep -Eq "$pattern" <<<"$TITLE"; then
+          echo "::error::pull request title: $TITLE"
+          failed=1
+        fi
+        if [ "$COMMITS" = true ]; then
+          # Into a variable first: a failed call fails the step (not so in a process substitution).
+          listed=$(gh api --paginate "repos/$REPOSITORY/pulls/$NUMBER/commits" \
+            --jq '.[] | select(.parents | length == 1) | [.sha, (.commit.message | split("\n")[0])] | @tsv')
+          while IFS=$'\t' read -r sha subject; do
+            [ -n "$sha" ] || continue
+            if ! grep -Eq "$pattern" <<<"$subject"; then
+              echo "::error::commit ${sha:0:7}: $subject"
+              failed=1
+            fi
+          done <<<"$listed"
+        fi
+        if [ "$failed" = 1 ]; then
+          echo "Expected <type>(<scope>)?!?: <description>, type one of: $TYPES."
+          exit 1
+        fi
