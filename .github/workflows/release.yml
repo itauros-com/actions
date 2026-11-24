@@ -1,0 +1,172 @@
+# Reusable: a release with semantic-release, of images a previous job pushed to GHCR. The
+# version comes from the Conventional Commits since the last release; the calling repository
+# owns what a release does, this workflow the environment it runs in and what follows it.
+#
+# The calling repository has:
+#   - package.json with semantic-release and its plugins, installed with pnpm (the version of
+#     its packageManager field), at pnpm-lock.yaml's versions;
+#   - a semantic-release configuration with tagFormat v${version}, whose @semantic-release/exec
+#     successCmd writes `released=${nextRelease.gitTag}` to $GITHUB_OUTPUT, and whose own steps
+#     promote the images (prepareCmd, with $IMAGES, the packages' references, space-separated):
+#     its tags, SBOMs and scans are the repository's business.
+#
+# The job runs with a GHCR login (the caller's token), a buildx builder and Trivy on the PATH
+# (itauros-com/actions/trivy), for the promotion. Once a stable version vX.Y.Z is out, the
+# prereleases it supersedes (vA.B.C-<prerelease-id>.N with A.B.C ≤ X.Y.Z) are deleted: their tags
+# on the GHCR images (an image left untagged goes with ghcr-cleanup), their GitHub Releases and
+# their git tags. A later version's prereleases are kept: semantic-release counts the next one
+# from them.
+#
+# The caller grants `contents: write` (the git tags, the GitHub Releases) and `packages: write`
+# (the image tags). A run cut off before the git tag is re-run (a promotion is idempotent); one
+# cut off after it (the GitHub Release, the cleanup) is finished by hand: a re-run finds the tag
+# and releases nothing.
+name: release
+
+on:
+  workflow_call:
+    inputs:
+      packages:
+        description: The GHCR packages a release promotes, comma-separated, under the repository owner (frontend,backend).
+        type: string
+        required: true
+      runs-on:
+        description: The runner label.
+        type: string
+        default: ubuntu-24.04
+      node-version:
+        description: Node.js for semantic-release.
+        type: string
+        default: lts/*
+      buildkit-endpoint:
+        description: A BuildKit daemon for buildx's remote driver (tcp://127.0.0.1:1234); empty, a builder of buildx's default driver.
+        type: string
+        default: ""
+      prerelease-id:
+        description: The prerelease identifier of the semantic-release configuration (vX.Y.Z-<id>.N).
+        type: string
+        default: rc
+    outputs:
+      released:
+        description: The tag released, empty when the commits released nothing.
+        value: ${{ jobs.release.outputs.released }}
+
+permissions: {}
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ${{ inputs.runs-on }}
+    permissions:
+      contents: write
+      packages: write
+    outputs:
+      released: ${{ steps.release.outputs.released }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      # GHCR's names are lowercase; an organization's login need not be.
+      - id: images
+        env:
+          OWNER: ${{ github.repository_owner }}
+          PACKAGES: ${{ inputs.packages }}
+        run: |
+          owner=${OWNER,,}
+          IFS=, read -ra listed <<<"$PACKAGES"
+          names=()
+          refs=()
+          for package in "${listed[@]}"; do
+            package=${package// /}
+            [ -n "$package" ] || continue
+            names+=("$package")
+            refs+=("ghcr.io/$owner/$package")
+          done
+          if [ "${#refs[@]}" = 0 ]; then
+            echo "::error::no package in packages"
+            exit 1
+          fi
+          {
+            echo "owner=$owner"
+            echo "packages=$(IFS=,; echo "${names[*]}")"
+            echo "list=${refs[*]}"
+          } >> "$GITHUB_OUTPUT"
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - if: inputs.buildkit-endpoint != ''
+        uses: docker/setup-buildx-action@v4
+        with:
+          driver: remote
+          endpoint: ${{ inputs.buildkit-endpoint }}
+      - if: inputs.buildkit-endpoint == ''
+        uses: docker/setup-buildx-action@v4
+      # Trivy reads GHCR with the login above.
+      - uses: itauros-com/actions/trivy@v1.1.1
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      - id: release
+        name: semantic-release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          IMAGES: ${{ steps.images.outputs.list }}
+        run: |
+          pnpm exec semantic-release
+          released=$(sed -n 's/^released=//p' "$GITHUB_OUTPUT")
+          echo "release: ${released:-none}" >> "$GITHUB_STEP_SUMMARY"
+
+      # A stable version supersedes its prereleases, and every older version's.
+      - id: superseded
+        if: steps.release.outputs.released != '' && !contains(steps.release.outputs.released, '-')
+        env:
+          STABLE: ${{ steps.release.outputs.released }}
+          ID: ${{ inputs.prerelease-id }}
+        run: |
+          version=${STABLE#v}
+          tags=()
+          while read -r tag; do
+            base=${tag#v}
+            base=${base%%-"$ID".*}
+            [[ $base =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || continue
+            # base ≤ version: the lower of the two, in version order, is base.
+            if [ "$(printf '%s\n%s\n' "$base" "$version" | sort -V | head -1)" = "$base" ]; then
+              tags+=("$tag")
+            fi
+          done < <(git tag --list "v*-$ID.*" | sort -V)
+          list=$(IFS=,; echo "${tags[*]}")
+          echo "list=$list" >> "$GITHUB_OUTPUT"
+          echo "superseded by $STABLE: ${list:-none}" >> "$GITHUB_STEP_SUMMARY"
+      # GHCR first: a prerelease whose git tag is gone but whose image tag stayed would be found
+      # by no later run. The image tags are unlinked; an image the stable version shares stays.
+      - name: superseded image tags
+        if: steps.superseded.outputs.list != ''
+        uses: dataaxiom/ghcr-cleanup-action@ac45a8c04b1eb4b27974ca79a0a74f344c93664b # v1.3.0
+        with:
+          owner: ${{ steps.images.outputs.owner }}
+          packages: ${{ steps.images.outputs.packages }}
+          delete-tags: ${{ steps.superseded.outputs.list }}
+      # The GitHub Release before its tag: a release whose tag is gone would stay as a draft.
+      - name: superseded releases and git tags
+        if: steps.superseded.outputs.list != ''
+        env:
+          TAGS: ${{ steps.superseded.outputs.list }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          IFS=, read -ra tags <<<"$TAGS"
+          for tag in "${tags[@]}"; do
+            if gh release view "$tag" >/dev/null 2>&1; then
+              gh release delete "$tag" --yes
+            fi
+          done
+          git push origin --delete "${tags[@]}"
