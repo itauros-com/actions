@@ -1,0 +1,69 @@
+# Reusable: the retention of a repository's GHCR images (GHCR has no lifecycle policy of its
+# own). The caller schedules it:
+#
+#   - tags matching `delete-tags` (by default the per-commit sha-<7 hex> tags) older than
+#     `older-than`: unlinked from an image that carries another tag too, and the image deleted
+#     with its platforms and attestations when it was the last one;
+#   - untagged images older than `older-than`;
+#   - never an image with a tag matching `exclude-tags` (by default vX.Y.Z and vX.Y.Z-rc.N).
+#
+# dataaxiom/ghcr-cleanup-action knows multi-arch indexes and referrers: a platform image or an
+# attestation is deleted only with its index. Each package gives the calling repository the
+# Admin role (Package settings → Manage Actions access), and the calling job grants
+# `packages: write`.
+name: ghcr-cleanup
+
+on:
+  workflow_call:
+    inputs:
+      packages:
+        description: The packages, comma-separated, under the repository owner (frontend,backend).
+        type: string
+        required: true
+      runs-on:
+        description: The runner label.
+        type: string
+        default: ubuntu-24.04
+      older-than:
+        description: How old a tag or an untagged image is before it goes.
+        type: string
+        default: 14 days
+      delete-tags:
+        description: A regular expression for the tags that go.
+        type: string
+        default: '^sha-[0-9a-f]{7}$'
+      # Two alternatives, not an optional (-rc\.\d+)? group: the action refuses a quantifier
+      # inside a quantified group as ReDoS-prone (safe-regex2).
+      exclude-tags:
+        description: A regular expression for the tags that keep their image.
+        type: string
+        default: '^v\d+\.\d+\.\d+$|^v\d+\.\d+\.\d+-rc\.\d+$'
+      dry-run:
+        description: Only list what would be deleted.
+        type: boolean
+        default: false
+
+permissions: {}
+
+jobs:
+  cleanup:
+    runs-on: ${{ inputs.runs-on }}
+    permissions:
+      packages: write
+    steps:
+      # GHCR's names are lowercase; an organization's login need not be.
+      - id: owner
+        env:
+          OWNER: ${{ github.repository_owner }}
+        run: echo "name=${OWNER,,}" >> "$GITHUB_OUTPUT"
+      - uses: dataaxiom/ghcr-cleanup-action@v1
+        with:
+          owner: ${{ steps.owner.outputs.name }}
+          packages: ${{ inputs.packages }}
+          use-regex: true
+          delete-tags: ${{ inputs.delete-tags }}
+          exclude-tags: ${{ inputs.exclude-tags }}
+          delete-untagged: true
+          older-than: ${{ inputs.older-than }}
+          validate: true
+          dry-run: ${{ inputs.dry-run }}
