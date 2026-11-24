@@ -81,8 +81,9 @@ gh release create v1.0.1 --generate-notes
 ```
 
 A release is never moved or deleted: consumers and their Dependabot rely on it. The
-repository's rulesets hold it so: a `v*` tag cannot be updated or deleted, and `main` changes
-only through a squash-merged pull request whose checks passed.
+repository holds it so: a `v*` tag cannot be updated or deleted (a ruleset), a published
+release and its assets cannot change (immutable releases), and `main` changes only through a
+squash-merged pull request whose checks passed (a ruleset).
 
 ## Changing an action
 
@@ -90,6 +91,9 @@ only through a squash-merged pull request whose checks passed.
   `conventional-commits` itself).
 - `ci.yml` runs every action as consumers do, Trivy on amd64 and arm64, and lints the
   workflows with actionlint.
+- Actions from outside GitHub (`actions/*`) and Docker (`docker/*`) are pinned by commit, with
+  the version in a comment (`@<sha> # vX.Y.Z`): what runs here runs in every consumer's job,
+  with its permissions, and a tag can be moved. Dependabot updates both.
 - Trivy's version: `version` and `digest` in [`trivy/action.yml`](trivy/action.yml). The
   digest is the new tag's image index, the same on `public.ecr.aws/aquasecurity/trivy`,
   `ghcr.io/aquasecurity/trivy` and `docker.io/aquasec/trivy`:

@@ -56,7 +56,9 @@ jobs:
         env:
           OWNER: ${{ github.repository_owner }}
         run: echo "name=${OWNER,,}" >> "$GITHUB_OUTPUT"
-      - uses: dataaxiom/ghcr-cleanup-action@v1
+      # By commit, not by tag: this step holds the caller's `packages: write`, and a tag can be
+      # moved. Dependabot bumps the commit and the version comment together.
+      - uses: dataaxiom/ghcr-cleanup-action@ac45a8c04b1eb4b27974ca79a0a74f344c93664b # v1.3.0
         with:
           owner: ${{ steps.owner.outputs.name }}
           packages: ${{ inputs.packages }}
