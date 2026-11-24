@@ -91,7 +91,7 @@ squash-merged pull request whose checks passed (a ruleset).
   `conventional-commits` itself).
 - `ci.yml` runs every action as consumers do, Trivy on amd64 and arm64, and lints the
   workflows with actionlint.
-- Actions from outside GitHub (`actions/*`) and Docker (`docker/*`) are pinned by commit, with
+- Actions other than GitHub's (`actions/*`) and Docker's (`docker/*`) are pinned by commit, with
   the version in a comment (`@<sha> # vX.Y.Z`): what runs here runs in every consumer's job,
   with its permissions, and a tag can be moved. Dependabot updates both.
 - Trivy's version: `version` and `digest` in [`trivy/action.yml`](trivy/action.yml). The
