@@ -19,6 +19,7 @@ credential, nothing about a particular product or client.
 | Workflow | What it does |
 |---|---|
 | [`ghcr-cleanup`](.github/workflows/ghcr-cleanup.yml) | The retention of a repository's GHCR images: per-commit tags and untagged images older than 14 days go, versioned images stay. Each package gives the calling repository the Admin role (Package settings → Manage Actions access). |
+| [`release`](.github/workflows/release.yml) | A semantic-release release of images a previous job pushed to GHCR, in a job with a GHCR login, buildx and Trivy (the repository's own configuration promotes the images); a stable version then deletes the prereleases it supersedes, from GHCR, GitHub Releases and git. The workflow's header has the contract with the calling repository. |
 
 ## Using them
 
@@ -26,7 +27,7 @@ Pin the release, never a branch:
 
 ```yaml
 - uses: docker/setup-buildx-action@v4
-- uses: itauros-com/actions/trivy@v1.1.0
+- uses: itauros-com/actions/trivy@v1.2.0
 - run: trivy image --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 "$IMAGE"
 ```
 
@@ -37,7 +38,7 @@ commits:
   permissions:
     pull-requests: read
   steps:
-    - uses: itauros-com/actions/conventional-commits@v1.1.0
+    - uses: itauros-com/actions/conventional-commits@v1.2.0
 ```
 
 A reusable workflow is a job of its own; the caller schedules it and grants its permissions:
@@ -57,12 +58,24 @@ permissions: {}
 
 jobs:
   cleanup:
-    uses: itauros-com/actions/.github/workflows/ghcr-cleanup.yml@v1.1.0
+    uses: itauros-com/actions/.github/workflows/ghcr-cleanup.yml@v1.2.0
     permissions:
       packages: write
     with:
       packages: frontend,backend
       dry-run: ${{ github.event_name == 'workflow_dispatch' && inputs.dry-run }}
+```
+
+```yaml
+release:
+  needs: [version, image]
+  if: needs.version.outputs.tag != ''
+  permissions:
+    contents: write
+    packages: write
+  uses: itauros-com/actions/.github/workflows/release.yml@v1.2.0
+  with:
+    packages: frontend
 ```
 
 Dependabot (`package-ecosystem: github-actions`) opens a pull request in each repository for
