@@ -3,7 +3,7 @@
 version: 2
 updates:
   - package-ecosystem: github-actions
-    directories: ["/", "/trivy"]
+    directories: ["/", "/trivy", "/techdocs"]
     schedule:
       interval: weekly
     commit-message:

@@ -13,6 +13,7 @@ credential, nothing about a particular product or client.
 |---|---|
 | [`trivy`](trivy/action.yml) | Puts a pinned Trivy release on the `PATH`, from the Actions cache (on a miss, from the first registry that serves its image), and caches Trivy's vulnerability database for the day. Needs a buildx builder set up first. |
 | [`conventional-commits`](conventional-commits/action.yml) | Checks a pull request's title (a squash merge's message) and its commits against [Conventional Commits](https://www.conventionalcommits.org). No checkout: the commits come from GitHub's API, so the job grants `pull-requests: read`. |
+| [`techdocs`](techdocs/action.yml) | Builds a repository's MkDocs docs with a pinned techdocs-cli and MkDocs (no Docker) and publishes them, through Workload Identity Federation, to the GCS bucket a Backstage portal with `techdocs.builder: external` reads. `publish: "false"` only builds. The publishing job grants `id-token: write`. |
 
 ## Reusable workflows
 
@@ -39,6 +40,25 @@ commits:
     pull-requests: read
   steps:
     - uses: itauros-com/actions/conventional-commits@v1.2.0
+```
+
+Docs built on every pull request and published from `main` (the bucket's IAM lets only `main`
+write):
+
+```yaml
+docs:
+  runs-on: ubuntu-24.04
+  permissions:
+    contents: read
+    id-token: write
+  steps:
+    - uses: actions/checkout@v7
+    - uses: itauros-com/actions/techdocs@v1.3.0
+      with:
+        entity: default/component/my-service
+        bucket: my-techdocs-bucket
+        workload-identity-provider: ${{ vars.WIF_PROVIDER }}
+        publish: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 ```
 
 A reusable workflow is a job of its own; the caller schedules it and grants its permissions:
