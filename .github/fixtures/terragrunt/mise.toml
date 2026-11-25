@@ -1,0 +1,7 @@
+[tools]
+opentofu = "1.13.2"
+terragrunt = "1.2.2"
+
+[env]
+# Terragrunt uses tofu even if terraform is installed on the machine.
+TG_TF_PATH = "tofu"

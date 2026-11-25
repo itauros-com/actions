@@ -20,6 +20,7 @@ credential, nothing about a particular product or client.
 | Workflow | What it does |
 |---|---|
 | [`ghcr-cleanup`](.github/workflows/ghcr-cleanup.yml) | The retention of a repository's GHCR images: per-commit tags and untagged images older than 14 days go, versioned images stay. Each package gives the calling repository the Admin role (Package settings → Manage Actions access). |
+| [`terragrunt`](.github/workflows/terragrunt.yml) | A Terragrunt repository's pipeline: each pull request plans every unit with the read-only identity and keeps the plan files; its merge into `main` applies exactly those plans (a direct push, a stale or expired plan applies nothing), then checks that nothing is left to apply. Through Workload Identity Federation. The workflow's header has the contract with the calling repository. |
 | [`release`](.github/workflows/release.yml) | A semantic-release release of images a previous job pushed to GHCR, in a job with a GHCR login, buildx and Trivy (the repository's own configuration promotes the images); a stable version then deletes the prereleases it supersedes, from GHCR, GitHub Releases and git. The workflow's header has the contract with the calling repository. |
 
 ## Using them
@@ -96,6 +97,32 @@ release:
   uses: itauros-com/actions/.github/workflows/release.yml@v1.2.0
   with:
     packages: frontend
+```
+
+A Terragrunt repository's whole pipeline, the units under `live/` and the identity chosen by the
+root configuration (`TG_PLAN_ONLY=true` on the pull request's plan):
+
+```yaml
+name: terraform
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  terragrunt:
+    uses: itauros-com/actions/.github/workflows/terragrunt.yml@v1.4.0
+    permissions:
+      contents: read
+      id-token: write
+      actions: read
+      pull-requests: read
+    with:
+      workload-identity-provider: ${{ vars.WIF_PROVIDER }}
 ```
 
 Dependabot (`package-ecosystem: github-actions`) opens a pull request in each repository for

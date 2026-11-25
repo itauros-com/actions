@@ -1,0 +1,316 @@
+# Reusable: a Terragrunt repository's pipeline, where `main` applies EXACTLY the plan reviewed in
+# the pull request, or nothing.
+#
+#   pull request  formatting check, the modules' tests (mock providers), `run --all plan` of every
+#                 unit with `plan-env` set (the read-only identity), plan files uploaded as the
+#                 artifact tfplan-<key>, where <key> hashes the code CI applies (`key-paths` and the
+#                 calling workflow's file) of the merge result. Fails if a provider lock file is
+#                 missing or not committed.
+#   push to main  finds the merged pull request, then the artifact of a successful plan run of
+#                 that pull request with the SAME key, and applies those plan files. Then a
+#                 verification plan must find nothing left to do.
+#
+# A direct push, a merge after main moved on or an expired plan (7 days) fail without touching
+# the cloud; OpenTofu also refuses a plan whose state changed ("Saved plan is stale"). Recovery is
+# always a new pull request (an empty commit will do).
+#
+# The contract with the calling repository:
+#
+#   - `mise.toml` in `root-directory` pins OpenTofu and Terragrunt (and sets TG_TF_PATH=tofu);
+#   - the units are under `units-directory`, the modules under `modules-directory`, each module's
+#     tests in its `tests/`;
+#   - the identity is NOT in the plan: the root configuration derives it per unit from the
+#     environment (GOOGLE_IMPERSONATE_SERVICE_ACCOUNT through `extra_arguments`), the read-only one
+#     when `plan-env` says so (by default TG_PLAN_ONLY=true), the deploying one otherwise;
+#   - the calling workflow runs on `pull_request` and on `push` to main with no paths filter (the
+#     recovery PR changes nothing), and on `workflow_dispatch` for a branch whose PR was opened
+#     with GITHUB_TOKEN (its plan; main is never applied that way);
+#   - the calling job grants `contents: read`, `id-token: write`, `actions: read` (the PR run's
+#     artifact) and `pull-requests: read` (the PR merged into the pushed commit).
+#
+# No key: GitHub's OIDC token, exchanged through Workload Identity Federation
+# (`workload-identity-provider`) as the federated principal itself, which the units then
+# impersonate. Empty, nothing authenticates (units that reach no cloud).
+#
+# On self-hosted runners whose nodes can be preempted, a cut-off job fails: re-run it. A plan
+# just runs again; an apply cut off midway may leave a unit's state lock held:
+# `terragrunt run -- force-unlock <id>` in that unit, by hand, then re-run (the saved plan of a
+# unit already applied is refused as stale: a new PR).
+name: terragrunt
+
+on:
+  workflow_call:
+    inputs:
+      workload-identity-provider:
+        description: >-
+          The Workload Identity Provider's full name,
+          projects/<number>/locations/global/workloadIdentityPools/<pool>/providers/<provider>.
+          Empty, nothing authenticates.
+        type: string
+        default: ""
+      runs-on:
+        description: The runner label.
+        type: string
+        default: itauros-ci
+      root-directory:
+        description: The directory holding mise.toml, the units and the modules, from the repository's root.
+        type: string
+        default: .
+      units-directory:
+        description: The units' directory, from root-directory.
+        type: string
+        default: live
+      modules-directory:
+        description: The modules' directory, from root-directory (formatting check and tests; absent, skipped).
+        type: string
+        default: modules
+      key-paths:
+        description: >-
+          The paths CI applies, space-separated, from root-directory: a change to any of them
+          makes a new plan necessary. The calling workflow's file is always added.
+        type: string
+        default: live modules mise.toml
+      filters:
+        description: Terragrunt --filter expressions, one per line, for every plan and apply (e.g. !./bootstrap).
+        type: string
+        default: ""
+      plan-env:
+        description: >-
+          Environment variables of the pull request's plan, one KEY=VALUE per line: how the root
+          configuration picks the read-only identity.
+        type: string
+        default: TG_PLAN_ONLY=true
+      gcloud-components:
+        description: >-
+          gcloud components to install (e.g. gke-gcloud-auth-plugin), space-separated. Empty,
+          no gcloud is set up.
+        type: string
+        default: ""
+
+permissions: {}
+
+env:
+  TG_NON_INTERACTIVE: "true"
+  # A dependency without state fails the run instead of planning with mock outputs: a saved plan
+  # never carries a fake id.
+  TG_NO_MOCKS: "true"
+
+jobs:
+  plan:
+    if: >-
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')
+    runs-on: ${{ inputs.runs-on }}
+    permissions:
+      contents: read
+      id-token: write
+    defaults:
+      run:
+        working-directory: ${{ inputs.root-directory }}/${{ inputs.units-directory }}
+    steps:
+      # pull_request checks out the merge of the PR into main: the code main will have.
+      - uses: actions/checkout@v7
+
+      # In a reusable workflow GITHUB_WORKFLOW_REF is the caller's: owner/repo/<path>@<ref>.
+      - name: Plan key (hash of the applied code)
+        id: key
+        working-directory: .
+        env:
+          ROOT: ${{ inputs.root-directory }}
+          KEY_PATHS: ${{ inputs.key-paths }}
+        run: |
+          set -euo pipefail
+          workflow=${GITHUB_WORKFLOW_REF%@*}
+          workflow=${workflow#"$GITHUB_REPOSITORY/"}
+          read -ra rel <<< "$KEY_PATHS"
+          paths=()
+          for p in "${rel[@]}"; do paths+=("$ROOT/$p"); done
+          key=$(git ls-tree HEAD -- "${paths[@]}" "$workflow" | sha256sum | cut -c1-40)
+          { echo "key=$key"; echo "workflow=$workflow"; } >> "$GITHUB_OUTPUT"
+          echo "Plan key: $key (${paths[*]} $workflow)"
+
+      # Direct WIF: the federated principal, which each unit's identity impersonates.
+      - if: inputs.workload-identity-provider != ''
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ inputs.workload-identity-provider }}
+
+      - if: inputs.gcloud-components != ''
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+        with:
+          install_components: ${{ inputs.gcloud-components }}
+
+      - uses: jdx/mise-action@236a21c3b91f5db6d4e174b348674a0f0caac06d # v5.2.9
+        with:
+          working_directory: ${{ inputs.root-directory }}
+
+      - name: Formatting check
+        env:
+          MODULES: ${{ github.workspace }}/${{ inputs.root-directory }}/${{ inputs.modules-directory }}
+        run: |
+          terragrunt hcl fmt --check --diff
+          if [ -d "$MODULES" ]; then tofu fmt -check -recursive -diff "$MODULES"; fi
+
+      - name: Module tests (mock providers)
+        env:
+          MODULES: ${{ github.workspace }}/${{ inputs.root-directory }}/${{ inputs.modules-directory }}
+        run: |
+          set -euo pipefail
+          [ -d "$MODULES" ] || exit 0
+          find "$MODULES" -type d -name tests -not -path '*/.terraform/*' | sort | while read -r tests; do
+            dir=$(dirname "$tests")
+            echo "::group::tofu test ${dir#"$MODULES/"}"
+            (cd "$dir" && tofu init -backend=false -input=false > /dev/null && tofu test)
+            echo "::endgroup::"
+          done
+
+      # Read-only: the plan identity can only read the state → no lock (-lock=false).
+      - name: Terragrunt run --all plan
+        env:
+          FILTERS: ${{ inputs.filters }}
+          PLAN_ENV: ${{ inputs.plan-env }}
+        run: |
+          set -euo pipefail
+          while read -r kv; do
+            [ -n "$kv" ] || continue
+            [[ "$kv" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] || { echo "::error::plan-env: a line is not KEY=VALUE"; exit 1; }
+            export "${kv?}"
+          done <<< "$PLAN_ENV"
+          args=()
+          while read -r f; do if [ -n "$f" ]; then args+=(--filter "$f"); fi; done <<< "$FILTERS"
+          terragrunt run --all "${args[@]}" --out-dir "$RUNNER_TEMP/plans" -- plan -lock=false
+
+      # The apply re-installs the providers: they must be the ones planned with.
+      - name: Provider lock files committed
+        working-directory: .
+        run: |
+          changed=$(git status --porcelain | grep -E 'terraform\.lock\.hcl$' || true)
+          if [ -n "$changed" ]; then
+            echo "$changed"
+            echo "::error::Provider lock files missing or out of date. Locally, in the units' directory: terragrunt run --all -- providers lock -platform=linux_amd64 -platform=linux_arm64 -platform=darwin_arm64, then commit them."
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: tfplan-${{ steps.key.outputs.key }}
+          path: ${{ runner.temp }}/plans
+          if-no-files-found: error
+          retention-days: 7
+
+  apply:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ${{ inputs.runs-on }}
+    concurrency:
+      group: terragrunt-apply-${{ inputs.root-directory }}
+      cancel-in-progress: false # one apply at a time, never one cut short
+    permissions:
+      contents: read
+      id-token: write
+      actions: read # the PR run's artifact
+      pull-requests: read # the PR merged into this commit
+    defaults:
+      run:
+        working-directory: ${{ inputs.root-directory }}/${{ inputs.units-directory }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Find the plan reviewed in the pull request
+        id: plan
+        working-directory: .
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          ROOT: ${{ inputs.root-directory }}
+          KEY_PATHS: ${{ inputs.key-paths }}
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$1"; exit 1; }
+          workflow=${GITHUB_WORKFLOW_REF%@*}
+          workflow=${workflow#"$GITHUB_REPOSITORY/"}
+          read -ra rel <<< "$KEY_PATHS"
+          paths=()
+          for p in "${rel[@]}"; do paths+=("$ROOT/$p"); done
+          key=$(git ls-tree HEAD -- "${paths[@]}" "$workflow" | sha256sum | cut -c1-40)
+
+          # 1. This commit is the merge of a PR into main (a direct push has none). The
+          #    association can lag a few seconds behind the push.
+          pr=""
+          for _ in 1 2 3 4 5 6; do
+            pr=$(gh api "repos/$REPO/commits/$SHA/pulls" \
+              --jq '[.[] | select(.merged_at != null and .base.ref == "main" and .merge_commit_sha == env.SHA)][0].number // empty')
+            [ -n "$pr" ] && break
+            sleep 10
+          done
+          [ -n "$pr" ] || fail "$SHA is not the merge of a pull request: a direct push to main is never applied."
+
+          # 2. A successful plan run of the calling workflow on a commit of that PR, whose
+          #    artifact has this commit's key (= the same code), newest first.
+          gh api --paginate "repos/$REPO/pulls/$pr/commits" --jq '.[].sha' > "$RUNNER_TEMP/pr-commits"
+          gh api "repos/$REPO/actions/artifacts?name=tfplan-$key&per_page=100" \
+            --jq '.artifacts[] | select(.expired | not) | "\(.created_at) \(.workflow_run.id) \(.workflow_run.head_sha)"' \
+            | sort -r > "$RUNNER_TEMP/candidates"
+          run_id=""
+          while read -r _ id head; do
+            grep -qx "$head" "$RUNNER_TEMP/pr-commits" || continue
+            meta=$(gh api "repos/$REPO/actions/runs/$id" --jq '"\(.path) \(.event) \(.conclusion)"' < /dev/null)
+            case "$meta" in
+              "$workflow pull_request success" | "$workflow workflow_dispatch success")
+                run_id=$id
+                break
+                ;;
+            esac
+          done < "$RUNNER_TEMP/candidates"
+          [ -n "$run_id" ] || fail "No successful plan of PR #$pr matches this code (key $key): main moved on after the plan, or the plan expired. Open a PR to re-plan (an empty commit will do)."
+
+          echo "Applying the plan of PR #$pr, run $run_id (key $key)"
+          { echo "key=$key"; echo "run_id=$run_id"; } >> "$GITHUB_OUTPUT"
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: tfplan-${{ steps.plan.outputs.key }}
+          run-id: ${{ steps.plan.outputs.run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/plans
+
+      - if: inputs.workload-identity-provider != ''
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ inputs.workload-identity-provider }}
+
+      - if: inputs.gcloud-components != ''
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+        with:
+          install_components: ${{ inputs.gcloud-components }}
+
+      - uses: jdx/mise-action@236a21c3b91f5db6d4e174b348674a0f0caac06d # v5.2.9
+        with:
+          working_directory: ${{ inputs.root-directory }}
+
+      # Applies the saved plan files, nothing else: no new plan is made here.
+      - name: Terragrunt run --all apply (the reviewed plans)
+        env:
+          FILTERS: ${{ inputs.filters }}
+        run: |
+          set -euo pipefail
+          args=()
+          while read -r f; do if [ -n "$f" ]; then args+=(--filter "$f"); fi; done <<< "$FILTERS"
+          terragrunt run --all "${args[@]}" --out-dir "$RUNNER_TEMP/plans" -- apply
+
+      # A unit planned against outputs that this same apply changed, or drift, leaves work to do:
+      # it goes through a follow-up PR.
+      - name: Verify nothing is left to apply
+        env:
+          FILTERS: ${{ inputs.filters }}
+        run: |
+          set -uo pipefail
+          args=()
+          while read -r f; do if [ -n "$f" ]; then args+=(--filter "$f"); fi; done <<< "$FILTERS"
+          terragrunt run --all "${args[@]}" -- plan -lock=false -detailed-exitcode
+          rc=$?
+          if [ "$rc" -eq 2 ]; then
+            echo "::error::Changes left after the apply (units planned against outputs this apply changed, or drift). Open a follow-up PR: its plan covers them."
+            exit 1
+          fi
+          exit "$rc"

@@ -1,0 +1,27 @@
+# The terragrunt reusable workflow, run on its fixture as a consumer runs it: the plan on every
+# pull request, the apply of that plan at its merge, then the verification plan. The fixture's
+# state is on the runner's disk and its only resource is OpenTofu's built-in terraform_data:
+# nothing reaches a cloud, so no Workload Identity Provider.
+name: terragrunt-fixture
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  terragrunt:
+    uses: ./.github/workflows/terragrunt.yml
+    permissions:
+      contents: read
+      id-token: write
+      actions: read
+      pull-requests: read
+    with:
+      runs-on: ubuntu-24.04
+      root-directory: .github/fixtures/terragrunt
+      # A unit whose module does not exist: the run fails if the filter does not hold.
+      filters: "!./excluded"
