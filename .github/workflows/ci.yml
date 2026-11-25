@@ -53,6 +53,21 @@ jobs:
           echo "::error::a title that is not a Conventional Commit passed"
           exit 1
 
+  # A build without publishing, as a consumer's pull requests run it: the fixture's site, through
+  # the pinned MkDocs and techdocs-cli.
+  techdocs:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - id: build
+        uses: ./techdocs
+        with:
+          source-dir: .github/fixtures/techdocs
+          publish: "false"
+      - env:
+          SITE: ${{ steps.build.outputs.site }}
+        run: test -f "$SITE/index.html" && test -f "$SITE/techdocs_metadata.json"
+
   # The workflows, the reusable ones included (ghcr-cleanup runs only in its callers).
   actionlint:
     runs-on: ubuntu-24.04

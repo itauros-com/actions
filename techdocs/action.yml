@@ -1,0 +1,132 @@
+# A repository's MkDocs documentation, built as Backstage TechDocs and published to a Google
+# Cloud Storage bucket, where a portal with `techdocs.builder: external` reads it.
+#
+# Built here, not by the portal: the portal runs no MkDocs and holds no write access. The build
+# is techdocs-cli's, without Docker (self-hosted runners may have no daemon): MkDocs and the
+# techdocs-core plugin in a virtualenv, both pinned.
+#
+# Published through Workload Identity Federation: google-github-actions/auth exchanges the job's
+# OIDC token for Google credentials, as the federated principal itself (no service account key,
+# and no service account unless `service-account` names one). The bucket's IAM decides who
+# writes; the job grants `id-token: write`.
+#
+# A site whose content hash (generate's etag) is the published one is not uploaded again.
+#
+# `publish: "false"` only builds: for pull requests, which then fail on a broken site before it
+# reaches the bucket.
+name: techdocs
+description: Builds a repository's MkDocs docs with techdocs-cli and publishes them to a GCS bucket for Backstage.
+inputs:
+  source-dir:
+    description: The directory holding mkdocs.yml.
+    default: .
+  entity:
+    description: The catalog entity the docs belong to, namespace/kind/name (e.g. default/component/portal).
+    default: ""
+  bucket:
+    description: The GCS bucket, the portal's techdocs.publisher.googleGcs.bucketName.
+    default: ""
+  workload-identity-provider:
+    description: >-
+      The Workload Identity Provider's full name,
+      projects/<number>/locations/global/workloadIdentityPools/<pool>/providers/<provider>.
+    default: ""
+  service-account:
+    description: A service account to impersonate; empty, the federated principal itself writes.
+    default: ""
+  publish:
+    description: '"true": build and publish; "false": build only.'
+    default: "true"
+  python-version:
+    description: Python's version, for MkDocs.
+    default: "3.13"
+  node-version:
+    description: Node.js's version, for techdocs-cli.
+    default: "24"
+  techdocs-core-version:
+    description: mkdocs-techdocs-core's version (PyPI), which pins MkDocs's.
+    default: 1.7.1
+  techdocs-cli-version:
+    description: "@techdocs/cli's version (npm)."
+    default: 1.15.0
+outputs:
+  site:
+    description: The built site's directory.
+    value: ${{ steps.paths.outputs.site }}
+runs:
+  using: composite
+  steps:
+    - id: paths
+      shell: bash
+      env:
+        SOURCE: ${{ inputs.source-dir }}
+        ENTITY: ${{ inputs.entity }}
+        BUCKET: ${{ inputs.bucket }}
+        PROVIDER: ${{ inputs.workload-identity-provider }}
+        PUBLISH: ${{ inputs.publish }}
+        CORE: ${{ inputs.techdocs-core-version }}
+        CLI: ${{ inputs.techdocs-cli-version }}
+      run: |
+        semver='^[0-9]+\.[0-9]+\.[0-9]+$'
+        [[ "$CORE" =~ $semver ]] || { echo "::error::techdocs-core-version: $CORE, not X.Y.Z"; exit 1; }
+        [[ "$CLI" =~ $semver ]] || { echo "::error::techdocs-cli-version: $CLI, not X.Y.Z"; exit 1; }
+        [ -f "$SOURCE/mkdocs.yml" ] || { echo "::error::source-dir: no mkdocs.yml in $SOURCE"; exit 1; }
+        case "$PUBLISH" in
+          true)
+            [[ "$ENTITY" =~ ^[^/]+/[^/]+/[^/]+$ ]] || { echo "::error::entity: '$ENTITY', not namespace/kind/name"; exit 1; }
+            [ -n "$BUCKET" ] || { echo "::error::bucket: empty"; exit 1; }
+            [[ "$PROVIDER" =~ ^projects/[0-9]+/locations/global/workloadIdentityPools/[^/]+/providers/[^/]+$ ]] \
+              || { echo "::error::workload-identity-provider: '$PROVIDER', not projects/<number>/locations/global/workloadIdentityPools/<pool>/providers/<provider>"; exit 1; }
+            ;;
+          false) ;;
+          *) echo "::error::publish: $PUBLISH, not true or false"; exit 1 ;;
+        esac
+        {
+          echo "venv=$RUNNER_TEMP/techdocs-venv"
+          echo "cli=$RUNNER_TEMP/techdocs-cli"
+          echo "site=$RUNNER_TEMP/techdocs-site"
+        } >> "$GITHUB_OUTPUT"
+
+    - uses: actions/setup-python@v7
+      with:
+        python-version: ${{ inputs.python-version }}
+    - uses: actions/setup-node@v7
+      with:
+        node-version: ${{ inputs.node-version }}
+
+    - shell: bash
+      env:
+        VENV: ${{ steps.paths.outputs.venv }}
+        CLI_DIR: ${{ steps.paths.outputs.cli }}
+        CORE: ${{ inputs.techdocs-core-version }}
+        CLI: ${{ inputs.techdocs-cli-version }}
+      run: |
+        python -m venv "$VENV"
+        "$VENV/bin/pip" install --quiet --disable-pip-version-check "mkdocs-techdocs-core==$CORE"
+        echo "$VENV/bin" >> "$GITHUB_PATH"
+        npm install --silent --no-audit --no-fund --prefix "$CLI_DIR" "@techdocs/cli@$CLI"
+        echo "$CLI_DIR/node_modules/.bin" >> "$GITHUB_PATH"
+
+    - shell: bash
+      env:
+        SOURCE: ${{ inputs.source-dir }}
+        SITE: ${{ steps.paths.outputs.site }}
+      run: |
+        mkdocs --version
+        techdocs-cli generate --no-docker --source-dir "$SOURCE" --output-dir "$SITE"
+
+    - if: inputs.publish == 'true'
+      uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+      with:
+        workload_identity_provider: ${{ inputs.workload-identity-provider }}
+        service_account: ${{ inputs.service-account }}
+
+    - if: inputs.publish == 'true'
+      shell: bash
+      env:
+        SITE: ${{ steps.paths.outputs.site }}
+        ENTITY: ${{ inputs.entity }}
+        BUCKET: ${{ inputs.bucket }}
+      run: |
+        techdocs-cli publish --publisher-type googleGcs --storage-name "$BUCKET" \
+          --entity "$ENTITY" --directory "$SITE" --skip-if-unchanged
