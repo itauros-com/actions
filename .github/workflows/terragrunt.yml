@@ -198,8 +198,11 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  # Not the push that creates main (a new repository's first commit, e.g. from a template): no
+  # pull request reviewed it, and there is nothing to apply yet; the first pull request plans
+  # its code. Any later direct push fails below.
   apply:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && !github.event.created
     runs-on: ${{ inputs.runs-on }}
     concurrency:
       group: terragrunt-apply-${{ inputs.root-directory }}
