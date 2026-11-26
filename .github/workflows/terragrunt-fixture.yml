@@ -25,3 +25,5 @@ jobs:
       root-directory: .github/fixtures/terragrunt
       # A unit whose module does not exist: the run fails if the filter does not hold.
       filters: "!./excluded"
+      # The token file is written and kept fresh; the fixture reaches no AWS.
+      aws-web-identity: true

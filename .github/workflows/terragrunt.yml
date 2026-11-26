@@ -28,9 +28,19 @@
 #   - the calling job grants `contents: read`, `id-token: write`, `actions: read` (the PR run's
 #     artifact) and `pull-requests: read` (the PR merged into the pushed commit).
 #
-# No key: GitHub's OIDC token, exchanged through Workload Identity Federation
-# (`workload-identity-provider`) as the federated principal itself, which the units then
-# impersonate. Empty, nothing authenticates (units that reach no cloud).
+# No key: GitHub's OIDC token, per cloud.
+#
+#   - GCP: exchanged through Workload Identity Federation (`workload-identity-provider`) as the
+#     federated principal itself, which the units then impersonate.
+#   - AWS (`aws-web-identity`): written to a file, rewritten every minute, whose path is
+#     AWS_WEB_IDENTITY_TOKEN_FILE; the root configuration sets AWS_ROLE_ARN per unit (the
+#     read-only role or the deploying one), and the provider, the S3 backend and the KMS key
+#     provider assume it.
+#   - Azure: nothing here. The azurerm provider and backend request the token themselves
+#     (ARM_USE_OIDC=true, the job's ACTIONS_ID_TOKEN_REQUEST_URL and _TOKEN); the root
+#     configuration sets ARM_CLIENT_ID per unit.
+#
+# None of them, nothing authenticates (units that reach no cloud).
 #
 # On self-hosted runners whose nodes can be preempted, a cut-off job fails: re-run it. A plan
 # just runs again; an apply cut off midway may leave a unit's state lock held:
@@ -48,6 +58,12 @@ on:
           Empty, nothing authenticates.
         type: string
         default: ""
+      aws-web-identity:
+        description: >-
+          GitHub's OIDC token (audience sts.amazonaws.com) in a file, kept fresh, as
+          AWS_WEB_IDENTITY_TOKEN_FILE: the units assume their AWS role (AWS_ROLE_ARN) from it.
+        type: boolean
+        default: false
       runs-on:
         description: The runner label.
         type: string
@@ -134,6 +150,29 @@ jobs:
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
         with:
           workload_identity_provider: ${{ inputs.workload-identity-provider }}
+
+      # Each OpenTofu process reads the file when it starts, and GitHub's token expires within
+      # minutes: a background loop rewrites it every minute until the job ends (the runner stops
+      # what a job leaves running).
+      - name: AWS web identity token
+        if: inputs.aws-web-identity
+        run: |
+          set -euo pipefail
+          file="$RUNNER_TEMP/aws-web-identity-token"
+          refresh="$RUNNER_TEMP/aws-web-identity-refresh.sh"
+          cat > "$refresh" <<'SH'
+          fetch() {
+            curl -sSf -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+              "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" \
+              | jq -er .value > "$1.tmp" && mv -f "$1.tmp" "$1"
+          }
+          fetch "$1" || exit 1
+          [ "${2:-}" = once ] && exit 0
+          while sleep 60; do fetch "$1" || true; done
+          SH
+          bash "$refresh" "$file" once
+          nohup bash "$refresh" "$file" > /dev/null 2>&1 &
+          echo "AWS_WEB_IDENTITY_TOKEN_FILE=$file" >> "$GITHUB_ENV"
 
       - if: inputs.gcloud-components != ''
         uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
@@ -281,6 +320,29 @@ jobs:
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
         with:
           workload_identity_provider: ${{ inputs.workload-identity-provider }}
+
+      # Each OpenTofu process reads the file when it starts, and GitHub's token expires within
+      # minutes: a background loop rewrites it every minute until the job ends (the runner stops
+      # what a job leaves running).
+      - name: AWS web identity token
+        if: inputs.aws-web-identity
+        run: |
+          set -euo pipefail
+          file="$RUNNER_TEMP/aws-web-identity-token"
+          refresh="$RUNNER_TEMP/aws-web-identity-refresh.sh"
+          cat > "$refresh" <<'SH'
+          fetch() {
+            curl -sSf -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+              "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" \
+              | jq -er .value > "$1.tmp" && mv -f "$1.tmp" "$1"
+          }
+          fetch "$1" || exit 1
+          [ "${2:-}" = once ] && exit 0
+          while sleep 60; do fetch "$1" || true; done
+          SH
+          bash "$refresh" "$file" once
+          nohup bash "$refresh" "$file" > /dev/null 2>&1 &
+          echo "AWS_WEB_IDENTITY_TOKEN_FILE=$file" >> "$GITHUB_ENV"
 
       - if: inputs.gcloud-components != ''
         uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1

@@ -20,7 +20,7 @@ credential, nothing about a particular product or client.
 | Workflow | What it does |
 |---|---|
 | [`ghcr-cleanup`](.github/workflows/ghcr-cleanup.yml) | The retention of a repository's GHCR images: per-commit tags and untagged images older than 14 days go, versioned images stay. Each package gives the calling repository the Admin role (Package settings → Manage Actions access). |
-| [`terragrunt`](.github/workflows/terragrunt.yml) | A Terragrunt repository's pipeline: each pull request plans every unit with the read-only identity and keeps the plan files; its merge into `main` applies exactly those plans (a direct push, a stale or expired plan applies nothing), then checks that nothing is left to apply. Through Workload Identity Federation. The workflow's header has the contract with the calling repository. |
+| [`terragrunt`](.github/workflows/terragrunt.yml) | A Terragrunt repository's pipeline: each pull request plans every unit with the read-only identity and keeps the plan files; its merge into `main` applies exactly those plans (a direct push, a stale or expired plan applies nothing), then checks that nothing is left to apply. No key: GitHub's OIDC token, through Workload Identity Federation on GCP, a web identity token file on AWS (`aws-web-identity`), the azurerm provider's own OIDC on Azure. The workflow's header has the contract with the calling repository. |
 | [`release`](.github/workflows/release.yml) | A semantic-release release of images a previous job pushed to GHCR, in a job with a GHCR login, buildx and Trivy (the repository's own configuration promotes the images); a stable version then deletes the prereleases it supersedes, from GHCR, GitHub Releases and git. The workflow's header has the contract with the calling repository. |
 
 ## Using them
@@ -124,6 +124,10 @@ jobs:
     with:
       workload-identity-provider: ${{ vars.WIF_PROVIDER }}
 ```
+
+On AWS, `aws-web-identity: true` instead of `workload-identity-provider`: the root configuration
+sets `AWS_ROLE_ARN` per unit. On Azure, neither: it sets `ARM_USE_OIDC=true` and `ARM_CLIENT_ID`
+per unit.
 
 Dependabot (`package-ecosystem: github-actions`) opens a pull request in each repository for
 every new release, reusable workflows included: a change here reaches a repository through
