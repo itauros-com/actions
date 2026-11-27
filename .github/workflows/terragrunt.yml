@@ -5,7 +5,8 @@
 #                 unit with `plan-env` set (the read-only identity), plan files uploaded as the
 #                 artifact tfplan-<key>, where <key> hashes the code CI applies (`key-paths` and the
 #                 calling workflow's file) of the merge result. Fails if a provider lock file is
-#                 missing or not committed.
+#                 missing or not committed. Checkov checks the plans (`checkov`): the resources
+#                 as they will be, whichever module makes them.
 #   push to main  finds the merged pull request, then the artifact of a successful plan run of
 #                 that pull request with the SAME key, and applies those plan files. Then a
 #                 verification plan must find nothing left to do.
@@ -26,7 +27,9 @@
 #     recovery PR changes nothing), and on `workflow_dispatch` for a branch whose PR was opened
 #     with GITHUB_TOKEN (its plan; main is never applied that way);
 #   - the calling job grants `contents: read`, `id-token: write`, `actions: read` (the PR run's
-#     artifact) and `pull-requests: read` (the PR merged into the pushed commit).
+#     artifact) and `pull-requests: read` (the PR merged into the pushed commit);
+#   - optionally, `.checkov.yaml` in `root-directory`: the Checkov checks the repository skips
+#     (`skip-check`), each with a comment saying why.
 #
 # No key: GitHub's OIDC token, per cloud.
 #
@@ -102,6 +105,13 @@ on:
           no gcloud is set up.
         type: string
         default: ""
+      checkov:
+        description: >-
+          Checkov on the pull request's plans: "report" lists the failed checks in the job's
+          summary and lets the plan pass; "enforce" fails the plan (so nothing is applied) while a
+          check fails; "off" skips it. A repository's skips: .checkov.yaml in root-directory.
+        type: string
+        default: report
 
 permissions: {}
 
@@ -110,6 +120,12 @@ env:
   # A dependency without state fails the run instead of planning with mock outputs: a saved plan
   # never carries a fake id.
   TG_NO_MOCKS: "true"
+  # Checkov from PyPI through uv, pinned, and its dependencies as PyPI had them on that day: a
+  # release published later is never picked up. Moved by hand, with versions at least two weeks
+  # old.
+  CHECKOV_VERSION: "3.4.5"
+  CHECKOV_DEPENDENCIES_BEFORE: "2026-11-13"
+  UV_VERSION: "0.13.8"
 
 jobs:
   plan:
@@ -203,13 +219,20 @@ jobs:
             echo "::endgroup::"
           done
 
-      # Read-only: the plan identity can only read the state → no lock (-lock=false).
+      # Read-only: the plan identity can only read the state → no lock (-lock=false). For Checkov,
+      # each plan in JSON too (--json-out-dir), next to the runner's temporary files only.
       - name: Terragrunt run --all plan
         env:
           FILTERS: ${{ inputs.filters }}
           PLAN_ENV: ${{ inputs.plan-env }}
+          CHECKOV: ${{ inputs.checkov }}
         run: |
           set -euo pipefail
+          case "$CHECKOV" in
+            report | enforce) json=(--json-out-dir "$RUNNER_TEMP/plans-json") ;;
+            off) json=() ;;
+            *) echo "::error::checkov: '$CHECKOV', not report, enforce or off"; exit 1 ;;
+          esac
           while read -r kv; do
             [ -n "$kv" ] || continue
             [[ "$kv" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] || { echo "::error::plan-env: a line is not KEY=VALUE"; exit 1; }
@@ -217,7 +240,45 @@ jobs:
           done <<< "$PLAN_ENV"
           args=()
           while read -r f; do if [ -n "$f" ]; then args+=(--filter "$f"); fi; done <<< "$FILTERS"
-          terragrunt run --all "${args[@]}" --out-dir "$RUNNER_TEMP/plans" -- plan -lock=false
+          terragrunt run --all "${args[@]}" --out-dir "$RUNNER_TEMP/plans" "${json[@]}" -- plan -lock=false
+
+      # The plans' resources as they will be, whatever module makes them (the source would show
+      # little: the units call modules elsewhere). The JSON plans hold every value in clear: they
+      # never leave the runner, and are deleted here. In "report" mode Checkov itself failing to
+      # run (PyPI unreachable, say) is a warning, not a failed plan.
+      - name: Checkov (the plans)
+        if: inputs.checkov != 'off'
+        working-directory: ${{ inputs.root-directory }}
+        env:
+          MODE: ${{ inputs.checkov }}
+          UV_CACHE_DIR: ${{ runner.temp }}/uv-cache
+        run: |
+          set -uo pipefail
+          plans="$RUNNER_TEMP/plans-json"
+          report="$RUNNER_TEMP/checkov.md"
+          args=(--framework terraform_plan -d "$plans" --skip-download --quiet --compact
+            -o cli -o github_failed_only --output-file-path "console,$report")
+          [ "$MODE" = report ] && args+=(--soft-fail)
+          [ -f .checkov.yaml ] && args=(--config-file .checkov.yaml "${args[@]}")
+          mise exec "uv@$UV_VERSION" -- uv tool run --exclude-newer "$CHECKOV_DEPENDENCIES_BEFORE" \
+            --from "checkov==$CHECKOV_VERSION" checkov "${args[@]}"
+          rc=$?
+          rm -rf "$plans"
+          {
+            echo "## Checkov ($MODE)"
+            if [ -s "$report" ]; then
+              cat "$report"
+            elif [ "$rc" -eq 0 ]; then
+              echo "No failed check."
+            else
+              echo "Checkov did not run (exit $rc): see the step's log."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$rc" -ne 0 ] && [ "$MODE" = report ]; then
+            echo "::warning::Checkov did not run (exit $rc): the plans are unchecked."
+            exit 0
+          fi
+          exit "$rc"
 
       # The apply re-installs the providers: they must be the ones planned with.
       - name: Provider lock files committed

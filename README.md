@@ -129,6 +129,17 @@ On AWS, `aws-web-identity: true` instead of `workload-identity-provider`: the ro
 sets `AWS_ROLE_ARN` per unit. On Azure, neither: it sets `ARM_USE_OIDC=true` and `ARM_CLIENT_ID`
 per unit.
 
+[Checkov](https://www.checkov.io) checks every pull request's plans: the resources as they will
+be, whichever module makes them. By default (`checkov: report`) the failed checks go to the
+job's summary and the plan passes; `checkov: enforce` fails the plan, and so the apply, while a
+check fails; `checkov: off` skips it. A repository skips the checks that do not apply to it in
+`.checkov.yaml`, next to its `mise.toml`, each with its reason:
+
+```yaml
+skip-check:
+  - CKV_AWS_117 # Lambda outside a VPC: the functions reach only AWS APIs
+```
+
 Dependabot (`package-ecosystem: github-actions`) opens a pull request in each repository for
 every new release, reusable workflows included: a change here reaches a repository through
 its own pull request and its own CI, never all of them at once.

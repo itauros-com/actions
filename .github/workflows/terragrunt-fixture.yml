@@ -27,3 +27,6 @@ jobs:
       filters: "!./excluded"
       # The token file is written and kept fresh; the fixture reaches no AWS.
       aws-web-identity: true
+      # Checkov installed and run on the plans: terraform_data has no check, so nothing fails,
+      # and any failure to run fails the fixture.
+      checkov: enforce
