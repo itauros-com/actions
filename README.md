@@ -13,7 +13,7 @@ credential, nothing about a particular product or client.
 |---|---|
 | [`trivy`](trivy/action.yml) | Puts a pinned Trivy release on the `PATH`, from the Actions cache (on a miss, from the first registry that serves its image), and caches Trivy's vulnerability database for the day. Needs a buildx builder set up first. |
 | [`conventional-commits`](conventional-commits/action.yml) | Checks a pull request's title (a squash merge's message) and its commits against [Conventional Commits](https://www.conventionalcommits.org). No checkout: the commits come from GitHub's API, so the job grants `pull-requests: read`. |
-| [`techdocs`](techdocs/action.yml) | Builds a repository's MkDocs docs with a pinned techdocs-cli and MkDocs (no Docker) and publishes them, through Workload Identity Federation, to the GCS bucket a Backstage portal with `techdocs.builder: external` reads. `publish: "false"` only builds. The publishing job grants `id-token: write`. |
+| [`techdocs`](techdocs/action.yml) | Builds a repository's MkDocs docs with a pinned techdocs-cli and MkDocs (no Docker) and publishes them, through Workload Identity Federation, to the GCS bucket a Backstage portal with `techdocs.builder: external` reads. `publish: "false"` only builds. The publishing job grants `id-token: write`. `project-id` (the bucket's project, else the provider's project number) is the Google client's project, which it otherwise asks Resource Manager for and is denied. |
 
 ## Reusable workflows
 
@@ -58,6 +58,7 @@ docs:
       with:
         entity: default/component/my-service
         bucket: my-techdocs-bucket
+        project-id: my-docs-project
         workload-identity-provider: ${{ vars.WIF_PROVIDER }}
         publish: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 ```

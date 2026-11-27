@@ -10,6 +10,12 @@
 # and no service account unless `service-account` names one). The bucket's IAM decides who
 # writes; the job grants `id-token: write`.
 #
+# techdocs-cli's Google client wants a project ID before its first request and, finding none in
+# the environment, asks Resource Manager for the identity pool's project, which the federated
+# principal cannot read: the publish then fails with "The caller does not have permission",
+# whatever the bucket's IAM. So the job always has one: `project-id`, or else the provider's
+# project number. Only the client's lookup uses it; the bucket alone decides who writes.
+#
 # A site whose content hash (generate's etag) is the published one is not uploaded again.
 #
 # `publish: "false"` only builds: for pull requests, which then fail on a broken site before it
@@ -33,6 +39,11 @@ inputs:
     default: ""
   service-account:
     description: A service account to impersonate; empty, the federated principal itself writes.
+    default: ""
+  project-id:
+    description: >-
+      The project the Google client reports as its own, best the bucket's; empty, the
+      workload-identity-provider's project number.
     default: ""
   publish:
     description: '"true": build and publish; "false": build only.'
@@ -63,6 +74,7 @@ runs:
         ENTITY: ${{ inputs.entity }}
         BUCKET: ${{ inputs.bucket }}
         PROVIDER: ${{ inputs.workload-identity-provider }}
+        PROJECT: ${{ inputs.project-id }}
         PUBLISH: ${{ inputs.publish }}
         CORE: ${{ inputs.techdocs-core-version }}
         CLI: ${{ inputs.techdocs-cli-version }}
@@ -77,6 +89,8 @@ runs:
             [ -n "$BUCKET" ] || { echo "::error::bucket: empty"; exit 1; }
             [[ "$PROVIDER" =~ ^projects/[0-9]+/locations/global/workloadIdentityPools/[^/]+/providers/[^/]+$ ]] \
               || { echo "::error::workload-identity-provider: '$PROVIDER', not projects/<number>/locations/global/workloadIdentityPools/<pool>/providers/<provider>"; exit 1; }
+            # The provider's project number when no project-id: projects/<number>/...
+            [ -n "$PROJECT" ] || { PROJECT=${PROVIDER#projects/}; PROJECT=${PROJECT%%/*}; }
             ;;
           false) ;;
           *) echo "::error::publish: $PUBLISH, not true or false"; exit 1 ;;
@@ -85,6 +99,7 @@ runs:
           echo "venv=$RUNNER_TEMP/techdocs-venv"
           echo "cli=$RUNNER_TEMP/techdocs-cli"
           echo "site=$RUNNER_TEMP/techdocs-site"
+          echo "project=$PROJECT"
         } >> "$GITHUB_OUTPUT"
 
     - uses: actions/setup-python@v7
@@ -120,6 +135,8 @@ runs:
       with:
         workload_identity_provider: ${{ inputs.workload-identity-provider }}
         service_account: ${{ inputs.service-account }}
+        # Exported as GOOGLE_CLOUD_PROJECT and the like, where techdocs-cli's client looks first.
+        project_id: ${{ steps.paths.outputs.project }}
 
     - if: inputs.publish == 'true'
       shell: bash
