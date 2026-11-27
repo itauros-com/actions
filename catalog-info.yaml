@@ -1,0 +1,14 @@
+# Read by the developer portal's discovery (every repository's catalog-info.yaml).
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: actions
+  description: Shared GitHub Actions and reusable workflows (Trivy, Conventional Commits, TechDocs, Terragrunt, releases), for repositories in several GitHub organizations.
+  annotations:
+    github.com/project-slug: itauros-com/actions
+  tags: [github-actions, ci]
+spec:
+  type: library
+  lifecycle: production
+  owner: group:default/platform
+  system: platform
