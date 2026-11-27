@@ -1,0 +1,4 @@
+# A top folder's skips (a cloud's, in a multi-cloud repository), merged with the root's.
+skip-check:
+  - CKV_GCP_1 # fixture: a skip from a top folder
+  - CKV_AWS_1 # fixture: the same as the root's, listed once

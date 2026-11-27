@@ -140,6 +140,10 @@ skip-check:
   - CKV_AWS_117 # Lambda outside a VPC: the functions reach only AWS APIs
 ```
 
+A repository with several clouds keeps each one's skips next to its units: a `.checkov.yaml`
+in a top folder of `units-directory` (`live/aws/.checkov.yaml`, `live/gcp/.checkov.yaml`) adds
+its `skip-check` to the root's; only `skip-check` is read there. The step logs the merged list.
+
 Dependabot (`package-ecosystem: github-actions`) opens a pull request in each repository for
 every new release, reusable workflows included: a change here reaches a repository through
 its own pull request and its own CI, never all of them at once.
