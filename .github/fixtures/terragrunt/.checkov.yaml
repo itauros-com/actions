@@ -1,0 +1,3 @@
+# The fixture's skips, merged with live/note/.checkov.yaml's: the step logs both.
+skip-check:
+  - CKV_AWS_1 # fixture: a skip from the root

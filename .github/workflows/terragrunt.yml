@@ -29,7 +29,8 @@
 #   - the calling job grants `contents: read`, `id-token: write`, `actions: read` (the PR run's
 #     artifact) and `pull-requests: read` (the PR merged into the pushed commit);
 #   - optionally, `.checkov.yaml` in `root-directory`: the Checkov checks the repository skips
-#     (`skip-check`), each with a comment saying why.
+#     (`skip-check`), each with a comment saying why; and one in any top folder of the units
+#     (`live/<cloud>/.checkov.yaml`, say), whose `skip-check` adds to it.
 #
 # No key: GitHub's OIDC token, per cloud.
 #
@@ -109,7 +110,8 @@ on:
         description: >-
           Checkov on the pull request's plans: "report" lists the failed checks in the job's
           summary and lets the plan pass; "enforce" fails the plan (so nothing is applied) while a
-          check fails; "off" skips it. A repository's skips: .checkov.yaml in root-directory.
+          check fails; "off" skips it. A repository's skips: .checkov.yaml in root-directory,
+          plus those of a .checkov.yaml in any top folder of units-directory.
         type: string
         default: report
 
@@ -251,6 +253,7 @@ jobs:
         working-directory: ${{ inputs.root-directory }}
         env:
           MODE: ${{ inputs.checkov }}
+          UNITS: ${{ inputs.units-directory }}
           UV_CACHE_DIR: ${{ runner.temp }}/uv-cache
         run: |
           set -uo pipefail
@@ -259,10 +262,40 @@ jobs:
           args=(--framework terraform_plan -d "$plans" --skip-download --quiet --compact
             -o cli -o github_failed_only --output-file-path "console,$report")
           [ "$MODE" = report ] && args+=(--soft-fail)
-          [ -f .checkov.yaml ] && args=(--config-file .checkov.yaml "${args[@]}")
-          mise exec "uv@$UV_VERSION" -- uv tool run --exclude-newer "$CHECKOV_DEPENDENCIES_BEFORE" \
-            --from "checkov==$CHECKOV_VERSION" checkov "${args[@]}"
-          rc=$?
+          # The skips: .checkov.yaml here, and one in each of the units' top folders (a cloud's,
+          # in a multi-cloud repository). One configuration, the skips of all of them.
+          configs=()
+          [ -f .checkov.yaml ] && configs+=(.checkov.yaml)
+          for f in "$UNITS"/*/.checkov.yaml; do [ -f "$f" ] && configs+=("$f"); done
+          rc=0
+          if [ "${#configs[@]}" -gt 0 ]; then
+            merged="$RUNNER_TEMP/checkov.yaml"
+            mise exec "uv@$UV_VERSION" -- uv run --no-project --exclude-newer "$CHECKOV_DEPENDENCIES_BEFORE" \
+              --with pyyaml python - "$merged" "${configs[@]}" <<'PY'
+          import sys, yaml
+          out, *files = sys.argv[1:]
+          config, skips = {}, []
+          for f in files:
+              data = yaml.safe_load(open(f)) or {}
+              for check in data.pop("skip-check", None) or []:
+                  if check not in skips:
+                      skips.append(check)
+              if f == ".checkov.yaml":
+                  config.update(data)
+              elif data:
+                  print(f"::warning::{f}: only skip-check is read here, not {', '.join(data)}")
+          config["skip-check"] = skips
+          yaml.safe_dump(config, open(out, "w"))
+          print(f"Skipped checks ({', '.join(files)}): {', '.join(skips) or 'none'}")
+          PY
+            rc=$?
+            args=(--config-file "$merged" "${args[@]}")
+          fi
+          if [ "$rc" -eq 0 ]; then
+            mise exec "uv@$UV_VERSION" -- uv tool run --exclude-newer "$CHECKOV_DEPENDENCIES_BEFORE" \
+              --from "checkov==$CHECKOV_VERSION" checkov "${args[@]}"
+            rc=$?
+          fi
           rm -rf "$plans"
           {
             echo "## Checkov ($MODE)"
